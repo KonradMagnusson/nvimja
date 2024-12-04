@@ -1,0 +1,245 @@
+Only in ninja: builddir
+Only in ninja: .cache
+diff --unified --recursive --text ninja/CMakeLists.txt ninja/CMakeLists.txt
+--- ninja/CMakeLists.txt	2024-12-04 16:17:08.336277032 +0100
++++ ninja/CMakeLists.txt	2024-12-04 20:10:04.018559826 +0100
+@@ -4,6 +4,7 @@
+ include(CheckIPOSupported)
+ 
+ option(NINJA_BUILD_BINARY "Build ninja binary" ON)
++set( CMAKE_EXPORT_COMPILE_COMMANDS ON )
+ option(NINJA_FORCE_PSELECT "Use pselect() even on platforms that provide ppoll()" OFF)
+ 
+ project(ninja CXX)
+@@ -123,6 +124,8 @@
+ 
+ check_platform_supports_browse_mode(platform_supports_ninja_browse)
+ 
++add_subdirectory( rpclib )
++include_directories( rpclib/include )
+ # Core source files all build into ninja library.
+ add_library(libninja OBJECT
+ 	src/build_log.cc
+@@ -152,6 +155,9 @@
+ 	src/util.cc
+ 	src/version.cc
+ )
++
++target_link_libraries( libninja PRIVATE rpc )
++
+ if(WIN32)
+ 	target_sources(libninja PRIVATE
+ 		src/subprocess-win32.cc
+Only in ninja: compile_commands.json
+Only in ninja: .gitmodules
+Only in ninja: rpclib
+diff --unified --recursive --text ninja/src/build.cc ninja/src/build.cc
+--- ninja/src/build.cc	2024-12-04 16:17:08.349610184 +0100
++++ ninja/src/build.cc	2024-12-04 16:14:34.941689150 +0100
+@@ -725,14 +725,14 @@
+ 
+         if (!StartEdge(edge, err)) {
+           Cleanup();
+-          status_->BuildFinished();
++          status_->BuildFinished( false );
+           return false;
+         }
+ 
+         if (edge->is_phony()) {
+           if (!plan_.EdgeFinished(edge, Plan::kEdgeSucceeded, err)) {
+             Cleanup();
+-            status_->BuildFinished();
++            status_->BuildFinished( false );
+             return false;
+           }
+         } else {
+@@ -758,7 +758,7 @@
+       if (!command_runner_->WaitForCommand(&result) ||
+           result.status == ExitInterrupted) {
+         Cleanup();
+-        status_->BuildFinished();
++        status_->BuildFinished( false );
+         *err = "interrupted by user";
+         return false;
+       }
+@@ -766,7 +766,7 @@
+       --pending_commands;
+       if (!FinishCommand(&result, err)) {
+         Cleanup();
+-        status_->BuildFinished();
++        status_->BuildFinished( false );
+         return false;
+       }
+ 
+@@ -780,7 +780,7 @@
+     }
+ 
+     // If we get here, we cannot make any more progress.
+-    status_->BuildFinished();
++    status_->BuildFinished( false );
+     if (failures_allowed == 0) {
+       if (config_.failures_allowed > 1)
+         *err = "subcommands failed";
+@@ -794,7 +794,7 @@
+     return false;
+   }
+ 
+-  status_->BuildFinished();
++  status_->BuildFinished( true );
+   return true;
+ }
+ 
+diff --unified --recursive --text ninja/src/status.h ninja/src/status.h
+--- ninja/src/status.h	2024-12-04 16:17:08.369609914 +0100
++++ ninja/src/status.h	2024-12-04 16:14:34.945022440 +0100
+@@ -32,7 +32,7 @@
+                                  int64_t end_time_millis, bool success,
+                                  const std::string& output) = 0;
+   virtual void BuildStarted() = 0;
+-  virtual void BuildFinished() = 0;
++  virtual void BuildFinished( bool Success ) = 0;
+ 
+   /// Set the Explanations instance to use to report explanations,
+   /// argument can be nullptr if no explanations need to be printed
+diff --unified --recursive --text ninja/src/status_printer.cc ninja/src/status_printer.cc
+--- ninja/src/status_printer.cc	2024-12-04 16:17:08.369609914 +0100
++++ ninja/src/status_printer.cc	2024-12-04 16:14:34.945022440 +0100
+@@ -173,6 +173,24 @@
+   time_predicted_percentage_ = cpu_time_millis_ / total_cpu_time_millis;
+ }
+ 
++namespace
++{
++
++std::string NaiveSanitize( const std::string& Input )
++{
++  std::string Out;
++  for ( const char c : Input )
++  {
++    if ( c == '"' )
++      Out += "\\\"";
++    else
++      Out += {c};
++  }
++  return std::move( Out );
++}
++
++}
++
+ void StatusPrinter::BuildEdgeFinished(Edge* edge, int64_t start_time_millis,
+                                       int64_t end_time_millis, bool success,
+                                       const string& output) {
+@@ -181,7 +199,12 @@
+ 
+   int64_t elapsed = end_time_millis - start_time_millis;
+   cpu_time_millis_ += elapsed;
+-
++  std::string stripped_output = StripAnsiEscapeCodes( output );
++  if ( !success || stripped_output.find( " warning: " ) != std::string::npos )
++  {
++    NvimCmd( "copen" );
++    NvimCmd( "caddexpr \"" + NaiveSanitize( stripped_output )+ "\"" );
++  }
+   // Do we know how long did this edge take last time?
+   if (edge->prev_elapsed_time_millis != -1) {
+     --eta_predictable_edges_remaining_;
+@@ -249,12 +272,23 @@
+ }
+ 
+ void StatusPrinter::BuildStarted() {
++  NvimCmd( "cexpr []" ); // clear quicklist
++  NvimCmd( "cclose" ); // close quicklist
++  NvimCmd( "lua vim.notify('Build started!', vim.log.levels.INFO, { title = 'ninja-qf', icon='󰝴' })" );
+   started_edges_ = 0;
+   finished_edges_ = 0;
+   running_edges_ = 0;
+ }
+ 
+-void StatusPrinter::BuildFinished() {
++void StatusPrinter::BuildFinished( bool Success ) {
++  if ( Success )
++  {
++    NvimCmd( "lua vim.notify('Build finished!', vim.log.levels.INFO, { title = 'ninja-qf', icon='󰝴' })" );
++  }
++  else
++  {
++    NvimCmd( "lua vim.notify('Build failed!', vim.log.levels.ERROR, { title = 'ninja-qf', icon='󰝴' })" );
++  }
+   printer_.SetConsoleLocked(false);
+   printer_.PrintOnNewLine("");
+ }
+diff --unified --recursive --text ninja/src/status_printer.h ninja/src/status_printer.h
+--- ninja/src/status_printer.h	2024-12-04 16:17:08.369609914 +0100
++++ ninja/src/status_printer.h	2024-12-04 16:14:34.945022440 +0100
+@@ -34,7 +34,7 @@
+                                  int64_t end_time_millis, bool success,
+                                  const std::string& output) override;
+   void BuildStarted() override;
+-  void BuildFinished() override;
++  void BuildFinished( bool Success ) override;
+ 
+   void Info(const char* msg, ...) override;
+   void Warning(const char* msg, ...) override;
+diff --unified --recursive --text ninja/src/util.cc ninja/src/util.cc
+--- ninja/src/util.cc	2024-12-04 16:17:08.372943201 +0100
++++ ninja/src/util.cc	2024-12-04 20:13:26.332546525 +0100
+@@ -39,6 +39,7 @@
+ #include <sys/time.h>
+ #endif
+ 
++#include <utility>
+ #include <vector>
+ 
+ #if defined(__APPLE__) || defined(__FreeBSD__)
+@@ -62,6 +63,39 @@
+ #include "edit_distance.h"
+ 
+ using namespace std;
++#include "rpc/client.h"
++
++
++static std::mutex RPCMutex;
++void NvimCmd(std::string command)
++{
++  static std::unique_ptr<rpc::client> pClient = nullptr;
++
++  {
++    std::lock_guard<std::mutex> Lock{ RPCMutex };
++    try
++    {
++      if (!pClient)
++      {
++        pClient = std::make_unique<rpc::client>( "127.0.0.1", 48199 );
++      }
++    }
++    catch ( const std::runtime_error& E )
++    {
++      return;
++    }
++  }
++
++  try
++  {
++    pClient->call("nvim_command", std::move(command) );
++  }
++  catch ( const std::runtime_error& E )
++  {
++    std::lock_guard<std::mutex> Lock{ RPCMutex };
++    pClient = nullptr;
++  }
++}
+ 
+ void Fatal(const char* msg, ...) {
+   va_list ap;
+diff --unified --recursive --text ninja/src/util.h ninja/src/util.h
+--- ninja/src/util.h	2024-12-04 16:17:08.372943201 +0100
++++ ninja/src/util.h	2024-12-04 16:14:34.948355726 +0100
+@@ -36,6 +36,8 @@
+ #  define NORETURN  // nothing for old compilers
+ #endif
+ 
++void NvimCmd(std::string command);
++
+ /// Log a fatal message and exit.
+ NORETURN void Fatal(const char* msg, ...);
+ 
