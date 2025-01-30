@@ -149,7 +149,7 @@ diff --unified --recursive --text ninja/src/status_printer.cc ninja/src/status_p
  void StatusPrinter::BuildStarted() {
 +  NvimCmd( "cexpr []" ); // clear quicklist
 +  NvimCmd( "cclose" ); // close quicklist
-+  NvimCmd( "lua vim.notify('Build started!', vim.log.levels.INFO, { title = 'ninja-qf', icon='󰝴' })" );
++  NvimCmd( "doautocmd User NinjaBuildStarted" );
    started_edges_ = 0;
    finished_edges_ = 0;
    running_edges_ = 0;
@@ -159,11 +159,11 @@ diff --unified --recursive --text ninja/src/status_printer.cc ninja/src/status_p
 +void StatusPrinter::BuildFinished( bool Success ) {
 +  if ( Success )
 +  {
-+    NvimCmd( "lua vim.notify('Build finished!', vim.log.levels.INFO, { title = 'ninja-qf', icon='󰝴' })" );
++    NvimCmd( "doautocmd User NinjaBuildFinished" );
 +  }
 +  else
 +  {
-+    NvimCmd( "lua vim.notify('Build failed!', vim.log.levels.ERROR, { title = 'ninja-qf', icon='󰝴' })" );
++    NvimCmd( "doautocmd User NinjaBuildFailed" );
 +  }
    printer_.SetConsoleLocked(false);
    printer_.PrintOnNewLine("");
